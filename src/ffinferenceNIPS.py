@@ -65,31 +65,25 @@ def loadMNIST(path='mnist.pkl.gz'):
 def loadCIFAR10(path='cifar-10-batches-py/'):
 	trainX = np.empty((0, 3072), dtype=TC.floatX)
 	trainY = []
-	
+
 	for i in xrange(1,6):
-		name    = path+"data_batch_"+str(i)
-		f       = open(name, 'rb')
-		dict    = pkl.load(f)
-		f.close()
-		
+		name = f"{path}data_batch_{str(i)}"
+		with open(name, 'rb') as f:
+			dict    = pkl.load(f)
 		bData   = dict["data"].astype(TC.floatX)/255.0
 		trainX  = np.concatenate([trainX, bData])
 		trainY += dict["labels"]
-	
+
 	trainY = np.eye(10)[trainY].astype(TC.floatX)
-	
+
 	return trainX, trainY
 def initWeights(r,c,isOrtho=False): # r=n, c=oldN
 	scale = np.sqrt(2.0/(r+c))
 	randM  = np.random.uniform(low=-scale, high=+scale, size=(r,c)).astype(TC.floatX)
-	if isOrtho:
-		U,s,VT = scipy.linalg.svd(randM, full_matrices=False)
-		if r > c:
-			return U
-		else:
-			return VT
-	else:
+	if not isOrtho:
 		return randM
+	U,s,VT = scipy.linalg.svd(randM, full_matrices=False)
+	return U if r > c else VT
 def initBiases(r):
 	return np.zeros(shape=(r,), dtype=TC.floatX)
 def Adam(svParams, sv1stM, sv2ndM, vGrads, t, alpha=0.001, beta1=0.9, beta2=0.999, eps=1e-8):
@@ -143,17 +137,17 @@ class GRN(object):
 		self.hLrn   = T.shared(np.full((), hLrn, dtype=TC.floatX)) # Learning Rate
 		self.hMom   = T.shared(np.full((), hMom, dtype=TC.floatX)) # Momentum
 		self.hL2P   = T.shared(np.full((), hL2P, dtype=TC.floatX)) # L2 norm Penalty
-		
+
 		# Parameters Construction
 		self.U      = self.consUs(isOrtho) # Matrices of Forwards  Contribution
 		self.V      = self.consVs(isOrtho) # Matrices of Backwards Contribution
 		self.b      = self.consbs()        # Biases   on Forwards  Contribution
 		self.c      = self.conscs()        # Biases   on Backwards Contribution
-		
+
 		# Set up Adam-trainable parameters.
 		self.p      = {p.name:p for p in self.U + self.V + self.b + self.c}
-		self.m1     = zerosLikeSVs(self.p, lambda x:x+"_m1")
-		self.m2     = zerosLikeSVs(self.p, lambda x:x+"_m2")
+		self.m1 = zerosLikeSVs(self.p, lambda x: f"{x}_m1")
+		self.m2 = zerosLikeSVs(self.p, lambda x: f"{x}_m2")
 		self.t      = T.shared(np.full((), 0,    dtype="uint64"))
 	def consUs(self, isOrtho=False):
 		U = []
@@ -161,7 +155,7 @@ class GRN(object):
 			# Going up, "old" is the lower layer.
 			oldN    = self.config[i-1]
 			n       = self.config[i]
-			U += [T.shared(initWeights(n, oldN, isOrtho), "U"+str(i))]
+			U += [T.shared(initWeights(n, oldN, isOrtho), f"U{str(i)}")]
 		return U
 	def consVs(self, isOrtho=False):
 		V = []
@@ -169,26 +163,25 @@ class GRN(object):
 			# Going down, "old" is the upper layer.
 			oldN    = self.config[i]
 			n       = self.config[i-1]
-			V      += [T.shared(initWeights(n, oldN, isOrtho), "V"+str(i-1))]
+			V += [T.shared(initWeights(n, oldN, isOrtho), f"V{str(i - 1)}")]
 		return V
 	def consbs(self):
 		b = []
 		for i in xrange(1, len(self.config)):
 			n       = self.config[i]
-			b      += [T.shared(initBiases(n), "b"+str(i))]
+			b += [T.shared(initBiases(n), f"b{str(i)}")]
 		return b
 	def conscs(self):
 		c = []
 		for i in xrange(0, len(self.config)-1):
 			n       = self.config[i]
-			c      += [T.shared(initBiases(n), "c"+str(i))]
+			c += [T.shared(initBiases(n), f"c{str(i)}")]
 		return c
 	def f(self, i, h):
 		"""Compute forward contribution into i'th layer from given input, which should
 		represent i-1'th layer."""
 		
-		if(isinstance(h, TT.sharedvar.TensorSharedVariable) or
-		   isinstance(h, TT.TensorVariable)):
+		if isinstance(h, (TT.sharedvar.TensorSharedVariable, TT.TensorVariable)):
 			return self.b[i-1] + TT.dot(self.rho(h), self.U[i-1].T)
 		else:
 			return self.b[i-1].get_value() + np.dot(self.rho(h), self.U[i-1].get_value().T)
@@ -196,8 +189,7 @@ class GRN(object):
 		"""Compute backwards contribution into i'th layer from given input, which should
 		represent i+1'th layer."""
 		
-		if(isinstance(h, TT.sharedvar.TensorSharedVariable) or
-		   isinstance(h, TT.TensorVariable)):
+		if isinstance(h, (TT.sharedvar.TensorSharedVariable, TT.TensorVariable)):
 			return self.c[i] + TT.dot(self.rho(h), self.V[i].T)
 		else:
 			return self.c[i].get_value() + np.dot(self.rho(h), self.V[i].get_value().T)
@@ -208,54 +200,54 @@ class GRN(object):
 		self.reconstructLossTFs = []
 		self.trainTFs           = []
 		self.stepTF             = None
-		
+
 		# Layers list
 		self.h   = [TT.matrix()] # Input (h0), formatted BatchSize x InputVectorLength
-		
+
 		#
 		# Create K reconstruction and training functions, one for each stacked AE and
 		# one "global" fine-tuning version.
 		#
-		
+
 		noise = TT.matrix()
+		actRegul   = 0 #(TT.mean(TT.sqrt(TT.sum((hNew)**2, axis=1)), axis=0)-1)**2
 		for i in xrange(len(self.config)-1):
 			# Compute reconstruction
 			hOld    = self.h[i]
 			self.h += [self.f(i+1, hOld)]
 			hNew    = self.g(i, self.f(i+1, hOld+noise))
-			
+
 			# Compute squared-error reconstruction error between hOld and its
 			# reconstruction hNew
 			sqdiff     = (hOld-hNew)**2
 			loss       = TT.sum(TT.mean(sqdiff, axis=0))
 			l2Regul    = self.hL2P*reduce(lambda a,b:a+b, map(lambda x: TT.sum(x**2), self.U+self.V))
-			actRegul   = 0 #(TT.mean(TT.sqrt(TT.sum((hNew)**2, axis=1)), axis=0)-1)**2
 			regul      = l2Regul + actRegul
-			
+
 			# Add to list of reconstruction functions
 			self.reconstructLossTFs += [T.function([self.h[0], noise], [TT.sqrt(loss)])]
 			self.trainTFs           += [T.function([self.h[0], noise], [TT.sqrt(loss)],
-		                                          updates=self.consUPDs(loss+regul, i))]
-		
-		
+			updates=self.consUPDs(loss+regul, i))]
+
+
 		#
 		# Create step function to report the magnitude of the step size at each
 		# relaxation iteration.
 		#
-		
+
 		eps        = TT.scalar()
 		self.oldH  = []
 		for i in xrange(0, len(self.config)):
 			self.oldH += [TT.matrix()]
 		self.newH = self.oldH[:]
-		
+
 		#
 		# Noise inputs
 		#
-		
+
 		relaxNoise = [TT.matrix() for i in xrange(1, len(self.config))]
-		
-		
+
+
 		# Resample odd layers
 		for i in xrange(1, len(self.config), 2):
 			if i == len(self.config)-1:
@@ -265,7 +257,7 @@ class GRN(object):
 				hTerm  = self.newH[i]
 				gTerm  = self.g(i, self.newH[i+1])
 				gfTerm = self.g(i, self.oldH[i+1])
-				
+
 				self.newH[i] = (1-eps)*self.newH[i] - eps*0.5*(self.f(i, self.newH[i-1])+
 				                                               gTerm) + relaxNoise[i-1] #hTerm+gTerm-gfTerm)
 		# Resample even layers
@@ -277,10 +269,10 @@ class GRN(object):
 				hTerm  = self.newH[i]
 				gTerm  = self.g(i, self.newH[i+1])
 				gfTerm = self.g(i, self.oldH[i+1])
-				
+
 				self.newH[i] = (1-eps)*self.newH[i] - eps*0.5*(self.f(i, self.newH[i-1])+
 				                                               gTerm) + relaxNoise[i-1] #hTerm+gTerm-gfTerm)
-		
+
 		# Compute squared-error reconstruction error between each h and its hp
 		self.oldNewSqdiffs    = map(lambda x: TT.mean(TT.sum((x[0]-x[1])**2, axis=1), axis=0), zip(self.oldH, self.newH))
 		self.oldMag           = TT.sqrt(reduce(lambda a,b:a+b, map(lambda x: TT.mean(TT.sum(x**2, axis=1), axis=0), self.oldH)))
@@ -292,34 +284,33 @@ class GRN(object):
 			V    = self.V[i]
 			b    = self.b[i]
 			c    = self.c[i]
-			
+
 			U_m1 = self.m1[U.name]
 			V_m1 = self.m1[V.name]
 			b_m1 = self.m1[b.name]
 			c_m1 = self.m1[c.name]
-			
+
 			U_m2 = self.m2[U.name]
 			V_m2 = self.m2[V.name]
 			b_m2 = self.m2[b.name]
 			c_m2 = self.m2[c.name]
-			
+
 			U_g  = T.grad(loss, U)
 			V_g  = T.grad(loss, V)
 			b_g  = T.grad(loss, b)
 			c_g  = T.grad(loss, c)
-			
+
 			return Adam([U,  V,  b,  c  ], [U_m1,V_m1,b_m1,c_m1], [U_m2,V_m2,b_m2,c_m2],
 			            [U_g,V_g,b_g,c_g], self.t, self.hLrn, self.hMom)
 		else:
 			p  = self.p.values()
 			m1 = [self.m1[x.name] for x in p]
 			m2 = [self.m1[x.name] for x in p]
-			g  = [T.grad(loss, p) for x in p]
-			
+			g = [T.grad(loss, p) for _ in p]
+
 			return Adam(p, m1, m2, g, self.t, self.hLrn, self.hMom)
 	def rho(self, x):
-		if(isinstance(x, TT.sharedvar.TensorSharedVariable) or
-		   isinstance(x, TT.TensorVariable)):
+		if isinstance(x, (TT.sharedvar.TensorSharedVariable, TT.TensorVariable)):
 			return TT.clip(x, 0.0, 1.0)                          # Hard Sigmoid
 		else:
 			return np.minimum(np.maximum(x,0.0),1.0)
@@ -516,15 +507,11 @@ def verb_dumpimage(arg=None):
 #
 
 if __name__ == "__main__":
-    #
-    # This script is invoked using a verb that denotes the general action to
-    # take, plus optional arguments. If no verb is provided or the one
-    # provided does not match anything, print a help message.
-    #
-    
-    if((len(sys.argv) > 1)                      and # Have a verb?
-       ("verb_"+sys.argv[1] in globals())       and # Have symbol w/ this name?
-       (callable(eval("verb_"+sys.argv[1])))):      # And it is callable?
-        eval("verb_"+sys.argv[1])(sys.argv)         # Then call it.
-    else:
-        verb_help(sys.argv)                         # Or offer help.
+	if (
+		len(sys.argv) > 1
+		and f"verb_{sys.argv[1]}" in globals()
+		and callable(eval(f"verb_{sys.argv[1]}"))
+	):
+		eval(f"verb_{sys.argv[1]}")(sys.argv)
+	else:
+		verb_help(sys.argv)                         # Or offer help.

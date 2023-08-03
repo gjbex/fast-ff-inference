@@ -60,14 +60,8 @@ def loadMNIST(path='mnist.pkl.gz'):
 def initWeights(r,c): # r=n, c=oldN
 	scale = np.sqrt(2.0/(r+c))
 	randM  = np.random.uniform(low=-scale, high=+scale, size=(r,c)).astype(TC.floatX)
-	if True:
-		U,s,VT = scipy.linalg.svd(randM, full_matrices=False)
-		if r > c:
-			return U
-		else:
-			return VT
-	else:
-		return randM
+	U,s,VT = scipy.linalg.svd(randM, full_matrices=False)
+	return U if r > c else VT
 def initBiases(r):
 	return np.zeros(shape=(r,), dtype=TC.floatX)
 
@@ -91,22 +85,21 @@ class DBM(object):
 		self.hMom   = T.shared(np.full((), hMom, dtype=TC.floatX)) # Momentum
 		self.hL2P   = T.shared(np.full((), hL2P, dtype=TC.floatX)) # L2 norm Penalty
 		self.hLin   = T.shared(np.full((), 0.0,  dtype=TC.floatX)) # Linearity (Initially 1.0)
-		
+
 		# Parameters
 		self.pW = []
-		self.pB = []
 		self.vW = []
 		self.vB = []
-		
+
 		oldN = self.config[0]
-		self.pB.append(T.shared(initBiases(oldN), "pB0"))
+		self.pB = [T.shared(initBiases(oldN), "pB0")]
 		self.vB.append(T.shared(np.zeros_like(initBiases(oldN)), "vB0"))
 		for i in xrange(1, len(self.config)):
 			n    = self.config[i]
-			pW   = T.shared(initWeights(n, oldN), "pW"+str(i-1))
-			pB   = T.shared(initBiases(n), "pB"+str(i))
-			vW   = T.shared(np.zeros_like(initWeights(n, oldN)), "vW"+str(i-1))
-			vB   = T.shared(np.zeros_like(initBiases(n)), "vB"+str(i))
+			pW = T.shared(initWeights(n, oldN), f"pW{str(i - 1)}")
+			pB = T.shared(initBiases(n), f"pB{str(i)}")
+			vW = T.shared(np.zeros_like(initWeights(n, oldN)), f"vW{str(i - 1)}")
+			vB = T.shared(np.zeros_like(initBiases(n)), f"vB{str(i)}")
 			self.pW.append(pW)
 			self.pB.append(pB)
 			self.vW.append(vW)
@@ -114,7 +107,7 @@ class DBM(object):
 			oldN = n
 	def constructTheanoFuncs(self):
 		# Theano functions
-		
+
 		# ********** Create ff init function *****************
 		self.h         = [TT.matrix()] # Input
 		for i in xrange(1, len(self.config)):
@@ -122,16 +115,16 @@ class DBM(object):
 			W       = self.pW[i-1]     # Matrix pW[i-1] relates the previous layer (i-1) to the
 			                           # current one (i)
 			B       = self.pB[i]       # Biases of current layer
-			
+
 			self.h += [TT.dot(self.rho(hm1), W.T) + B] # Append computation of next layer
-		
+
 		self.ffinitF          = T.function([self.h[0]], self.h)
-		
-		
+
+
 		# ********** Create reconstruction penalty & training functions *****************
 		# Copy list of hiddens h to h'
 		self.hp  = self.h[:]
-		
+
 		# Reconstruction penalty and training functions
 		self.reconstructLossFs = []
 		self.trainFs           = []
@@ -141,42 +134,41 @@ class DBM(object):
 			B   = self.pB[i]
 			Bp  = self.pB[i+1]
 			W   = self.pW[i]
-			
+
 			self.hp[i] = B + TT.dot(self.rho(Bp + (TT.dot(self.rho(h), W.T))), W)
-			
+
 			# Compute squared-error reconstruction error between each h and its hp
 			sqdiff     = (self.h[i]-self.hp[i])**2
 			loss       = TT.sum(TT.mean(sqdiff, axis=1))
-			
+
 			# Add to list of reconstruction functions
 			self.reconstructLossFs.append(T.function([self.h[0]], [loss]))
 			self.trainFs.append(T.function([self.h[0]],
 		                                   [loss],
 		                                   updates=self.computeTrainUpdates(loss, i)))
-		
+
 		# ********** Create step function *****************
 		# Create step function to report the magnitude of the step size at each resampling iteration.
 		self.oldH = []
 		for i in xrange(0, len(self.config)):
 			self.oldH += [TT.matrix()]
 		self.newH = self.oldH[:]
-			
+
 		# Resample odd layers
 		for i in xrange(1, len(self.config), 2):
+			Wm  = self.pW[i-1]
 			if i == len(self.config)-1:
 				# Last layer gets special treatment
 				hm1 = self.newH[i-1]
-				Wm  = self.pW[i-1]
 				B   = self.pB[i]
-				
+
 				self.newH[i] = B + 1.0*(TT.dot(self.rho(hm1), Wm.T))
 			else:
 				hm1 = self.newH[i-1]
 				hp1 = self.newH[i+1]
-				Wm  = self.pW[i-1]
 				Wp  = self.pW[i]
 				B   = self.pB[i]
-				
+
 				self.newH[i] = B + 0.5*(TT.dot(self.rho(hm1), Wm.T) + TT.dot(self.rho(hp1), Wp))
 		# Resample even layers
 		for i in xrange(2, len(self.config), 2):
@@ -185,7 +177,7 @@ class DBM(object):
 				hm1 = self.oldH[i-1]
 				Wm  = self.pW[i-1]
 				B   = self.pB[i]
-				
+
 				self.newH[i] = B + 1.0*(TT.dot(self.rho(hm1), Wm.T))
 			else:
 				hm1 = self.newH[i-1]
@@ -193,9 +185,9 @@ class DBM(object):
 				Wm  = self.pW[i-1]
 				Wp  = self.pW[i]
 				B   = self.pB[i]
-				
+
 				self.newH[i] = B + 0.5*(TT.dot(self.rho(hm1), Wm.T) + TT.dot(self.rho(hp1), Wp))
-		
+
 		# Compute squared-error reconstruction error between each h and its hp
 		self.oldNewSqdiffs    = map(lambda x: TT.sum(TT.mean((x[0]-x[1])**2, axis=0)), zip(self.oldH, self.newH))
 		self.oldNewLoss       = reduce(lambda a,b:a+b, self.oldNewSqdiffs)
@@ -330,15 +322,11 @@ def verb_dumpimage(arg=None):
 #
 
 if __name__ == "__main__":
-    #
-    # This script is invoked using a verb that denotes the general action to
-    # take, plus optional arguments. If no verb is provided or the one
-    # provided does not match anything, print a help message.
-    #
-    
-    if((len(sys.argv) > 1)                      and # Have a verb?
-       ("verb_"+sys.argv[1] in globals())       and # Have symbol w/ this name?
-       (callable(eval("verb_"+sys.argv[1])))):      # And it is callable?
-        eval("verb_"+sys.argv[1])(sys.argv)         # Then call it.
-    else:
-        verb_help(sys.argv)                         # Or offer help.
+	if (
+		len(sys.argv) > 1
+		and f"verb_{sys.argv[1]}" in globals()
+		and callable(eval(f"verb_{sys.argv[1]}"))
+	):
+		eval(f"verb_{sys.argv[1]}")(sys.argv)
+	else:
+		verb_help(sys.argv)                         # Or offer help.
